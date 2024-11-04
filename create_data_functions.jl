@@ -66,15 +66,15 @@ function add_job_resource(data::DataFrame, path_dictionary::Dict{Int64, Vector{I
     return data_job_resource
 end
 
+#Samples from truncated gamma distributed random variable
 function truncated_gamma_realization(mu::Int64, CV::Float64, threshold_coefficient::Int64)
-    #TODO
     threshold = mu * threshold_coefficient
     shape = 1 ./ CV.^2
     rate = 1 ./ (mu .* CV .^2)
     scale = 1/rate
-    gamma_dist = Gamma(shape, scale)
-    truncated_gamma_dist = truncated(gamma_dist, upper = threshold)
-    realization = rand(truncated_gamma_dist)
+    gamma_dist = Gamma(shape, scale) #Gamma distribution with given parameters
+    truncated_gamma_dist = truncated(gamma_dist, upper = threshold) #Truncated gamma distribution
+    realization = rand(truncated_gamma_dist) #One realization/observation from truncated gamma distribution
     return realization
 end
 

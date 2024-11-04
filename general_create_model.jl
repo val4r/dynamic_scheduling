@@ -1,6 +1,14 @@
 using JuMP
 using HiGHS
 
+#Function that adds workload distribution constraints to model
+#Inputs:
+    #model: Model object to which constraints are added, Model
+    #job_window: Vector of jobs in the job window, Vector{Int64}
+    #duration_window: Job duration of jobs in the job window, Vector{Int64}
+    #workload_distribution: Is workload distribution even or free? String
+#Output: 
+    #model: Model with added constraints
 function add_workload_constraint(model::Model, job_window::Vector{Int64}, duration_window::Vector{Int64}, workload_distribution::String = "even")
     K_w = size(model[:R])[2]
     T_w = size(model[:R])[3]
@@ -9,18 +17,18 @@ function add_workload_constraint(model::Model, job_window::Vector{Int64}, durati
         for (i,j) in enumerate(job_window)
             for t in 1:T_w
                 for k in 1:K_w
-                    #NOTICE: j: job index, i: index of job in vector. i has to be used accessing P_w
+                    #NOTICE: j: job index, i: index of job in vector. i has to be used accessing duration_window
                     #Model variables can be accessed with j.
-                    @constraint(model, model[:R][j,k,t] == WC[j,k]*model[:X][j,t]/duration_window[i]) #equation 11 (even workload distribution)
+                    @constraint(model, model[:R][j,k,t] == WC[j,k]*model[:X][j,t]/duration_window[i]) #even workload distribution
                 end
             end
         end
     elseif workload_distribution == "free"
         for i in job_window
             for k in 1:K_w
-                @constraint(model, sum(model[:R][i,k,t] for t in 1:T_w) == WC[i,k]) #equation 9 (free workload distribution)
+                @constraint(model, sum(model[:R][i,k,t] for t in 1:T_w) == WC[i,k]) #all work content/load should be distributed...
                 for t in 1:T_w
-                    @constraint(model, model[:R][i,k,t] <= (M*model[:X][i,t]))  #equation 10
+                    @constraint(model, model[:R][i,k,t] <= (M*model[:X][i,t]))  #... for the days when job is ongoing
                 end
             end
         end
@@ -31,7 +39,13 @@ function add_workload_constraint(model::Model, job_window::Vector{Int64}, durati
 end
 
 
-#Creates "general" precedence constraints in modified model 
+#Creates "general" precedence constraints in newest version of model (4.11.)
+#Due to nature of manufacturing system and data generation model, the precedence constraints is formed by consecutive rows of dataset. 
+#(Consecutive rows of jobs/activities of each order)
+#Input:
+    #data: Generated dataset, DataFrame
+#Output:
+    #all_constraints: dictionary, key: job_id => value: successor_job_id, Dict{Int64, Int64}
 function all_precedence_constraints(data::DataFrame)
     function order_precedences(jobs_in_order::Vector{Int64})
         precedence_constraints = Dict{Int64, Int64}()
@@ -53,11 +67,19 @@ function all_precedence_constraints(data::DataFrame)
     return all_constraints
 end
 
+#Add timing template constraints. 
+#Inputs:
+    #model: Model object to which constraints are added, Model
+    #job_window: Vector of jobs in the job window, Vector{Int64}
+    #start_time: Starting time of jobs, Dictionary
+    #precedence_consts: Precedence constraints of jobs, Dict{Int64, Int64}
+    #timing_template: Fixed, if no gap between jobs/activities, free if gap allowed, String
+#Output:
+    #model: Modified model, Model
 function add_timing_temp_constraints(model::Model, job_window::Vector{Int64}, start_time::Dict{Int64, Int64}, precedence_consts::Dict{Int64, Int64}, timing_template::String = "fixed")
     #FIXME: GLOBAL VARIABLES ARE USED NOW:
         #I, P (this should also be changed to dict..), 
     all_jobs = collect(keys(precedence_consts)) #Those jobs which HAVE successors
-    #HUOM! JOS KAPPA ON LIIAN PIENI JA TÖITÄ KERTYY TYÖIKKUNAAN MAKSIMIT, OSA SEURAAJISTA VOI OLLA VIELÄ S_a:ssa!!!! TÄLLÖIN EI PYSTY ASETTAMAAN EDELTÄVYYSRAJOITETTA!! TODO: tän vois vaikka korjata tai jotain...
     if timing_template == "fixed" #finish time of predecessor == starting time of successor
         for job in all_jobs
             successor = precedence_consts[job]
@@ -69,11 +91,11 @@ function add_timing_temp_constraints(model::Model, job_window::Vector{Int64}, st
                 #if job nor its successor is in job_window, there is no need for constraints
             end
         end
-    elseif timing_template == "free"
+    elseif timing_template == "free" 
         for job in all_jobs
             successor = precedence_consts[job]
             if job in job_window
-                @constraint(model, model[:C][job] <= model[:C][successor] - P[successor]) #if job is in job window, so will its successor also be
+                @constraint(model, model[:C][job] <= model[:C][successor] - P[successor]) #FIXME: see above
             elseif job ∉ job_window && successor in job_window
                 @constraint(model, (start_time[job] + P[job]) <= model[:C][successor] - P[successor]) 
             else 
@@ -83,7 +105,6 @@ function add_timing_temp_constraints(model::Model, job_window::Vector{Int64}, st
     else
         print("error")
     end
-    
     return model
 end
 
@@ -102,17 +123,6 @@ function find_scheduled_jobs(S_w::Vector{Int64}, scheduled_starts::Dict{Int64, I
     return scheduled
 end
 
-"DEPRECATED STARTS"
-#Jobs which have started but not yet finished
-#Reminder: finish time is next timestep after last timestep when job is ongoing
-#=function find_ongoing_jobs(timestep::Int64, job_starts::Dict{Int64, Int64}, job_finish::Dict{Int64, Int64})
-    all_started = [key for (key, value) in job_starts if value <= timestep]
-    all_not_finished = [key for (key, value) in job_finish if value > timestep]
-    ongoing = intersect(all_started, all_not_finished)
-    return ongoing
-end=#
-"DEPRECATED ENDS"
-
 
 #Creates constraints that prevents rescheduling already scheduled jobs
 #Used when rescheduling strategy is Frozen/Fixed
@@ -125,7 +135,6 @@ end=#
     #model: The model with added constraints
 function fix_scheduled_jobs(model::Model, scheduled_jobs::Vector{Int64}, scheduled_starts::Dict{Int64, Int64}, durations::Dict{Int64, Int64})
     for job in scheduled_jobs
-        #TODO: TARKISTA!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         @constraint(model, (model[:C][job] - scheduled_starts[job] - durations[job]) == 0)        
     end
     return model
@@ -143,7 +152,6 @@ end
     #model: The model with added constraints    
 function postpone_scheduled_jobs(model::Model, scheduled_jobs::Vector{Int64}, scheduled_starts::Dict{Int64, Int64}, durations::Dict{Int64, Int64}, due_dates::Dict{Int64, Int64})
     for job in scheduled_jobs
-        #TODO: TARKISTA!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         @constraint(model, model[:C][job] - scheduled_starts[job] - durations[job] >= 0)
         #TODO: distance to deadline-constraints
     end
@@ -159,9 +167,13 @@ function create_job_window_data(S_w::Vector{Int64}, I::Int64, P::Vector{Int64}, 
     return P_w, D_w, A_w, WC_w, OA_w
 end
 
-#TODO: Parameter objects
+#TODO: Parameter object
+#Creates model with job window jobs and corresponding data. 
 function create_job_window_model(S_w, P_w, D_w, A_w, WC_w, OA_w, job_start::Dict{Int64, Int64}, capacity::Vector{Int64}, timestep::Int64, R_auxiliary::Array{Float64, 3}, prec_consts::Dict{Int64, Int64}, workload_distribution::String = "even", timing_template::String = "fixed", forward_planning::Bool = false, backward_planning::Bool = false, planning_const = 10)
+
+    #Create model with HiGHS as optimizer
     model = Model(HiGHS.Optimizer)
+    
     #FIXME: GLOBAL VARIABLES ARE USED NOW:
         #K, 
         #T
@@ -176,21 +188,22 @@ function create_job_window_model(S_w, P_w, D_w, A_w, WC_w, OA_w, job_start::Dict
     @variable(model, Max_tardiness >= 0) #Tardiness of job with largest tardiness
     @variable(model, c[S_w, 1:T], Bin) #Job completion
     @variable(model, X[S_w, 1:T], Bin) #1 if work i is ongoing
+    
     #Constraints:
     #"Constant" constraints are defined explicitly here,
     #For model "parameter" constraints auxiliary functions are used
 
-    #equation 2
+    #Each job finishes only once
     for i in S_w
         @constraint(model, sum(c[i, t] for t in 1:T) == 1)
     end
-    #equation 3
+    
+    #Completion time
     for i in S_w
         @constraint(model, sum(t*c[i,t] for t in 1:T) == C[i])
     end
     
-    #equation 5
-    #TODO: TARKISTA!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    #Job cannot start before arrival time of order to which it belongs
     for i in S_w
         @constraint(model, C[i] - P[i] >= A[i])
     end
@@ -203,7 +216,7 @@ function create_job_window_model(S_w, P_w, D_w, A_w, WC_w, OA_w, job_start::Dict
         end
     end
     
-    #Fixed version
+    #X_it is 1 if job is ongoing
     for i in S_w
         for t in 1:T
             @constraint(model, X[i,t] == sum(c[i,u] for u in (t+1):(t+P[i]) if u <= T))
@@ -212,13 +225,11 @@ function create_job_window_model(S_w, P_w, D_w, A_w, WC_w, OA_w, job_start::Dict
     
     #constraint that makes sure that starting time of job is not placed in the history
     #i.e. starting times of rescheduled jobs are larger or equal to present time
-    #TODO: TARKISTA!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     for i in S_w
         @constraint(model, C[i] - P[i] >= timestep)
     end
 
     #Tardiness constraint:
-    #TODO: TARKISTA!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     for i in S_w
         @constraint(model,  C[i] - D[i] <= tardiness[i])
     end
@@ -228,10 +239,14 @@ function create_job_window_model(S_w, P_w, D_w, A_w, WC_w, OA_w, job_start::Dict
         @constraint(model, Max_tardiness >= tardiness[i])
     end
 
-    #TODO: Aseta läpäisyaikarajoite: 2 x minimitoimitusaika
-    for i in S_w
-        @constraint(model, C[i] <= (D[i]-A[i] .+ 1)*5/1.5)
+    #TODO: Aseta läpäisyaikarajoite: N x minimitoimitusaika
+    #TODO: testaile sopivia parametriarvoja tähän siten, että malli on ratkaistavissa
+    #FIXME: Nyt läpäisyaikarajoiteen "laskenta" alkaa nollasta, vaikka sen pitäisi alkaa siitä kun tilauksen ensimmäinen työ alkaa. KORJAA!!
+    #Katso myös datan generointi slack_coefficient 
+    #=for i in S_w
+        @constraint(model, C[i] <= (D[i]-A[i] .+ 1)*2/1.5)
     end
+    =#
     
     #workload distribution
     model = add_workload_constraint(model, S_w, P_w, workload_distribution)
@@ -239,8 +254,7 @@ function create_job_window_model(S_w, P_w, D_w, A_w, WC_w, OA_w, job_start::Dict
     model = add_timing_temp_constraints(model, S_w, job_start, prec_consts, timing_template)
 
 
-    #TODO: lisää tähän myös myöhästymien summa
-    @objective(model, Min, 0.6 * Max_tardiness + 0.4 * sum(tardiness[i] for i in S_w))
+    @objective(model, Min, 10 * Max_tardiness + 1 * sum(tardiness[i] for i in S_w))
     
     return model
 end

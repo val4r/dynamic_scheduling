@@ -3,6 +3,7 @@ include("visualization_functions.jl")
 include("structures.jl")
 
 #Function which can be used for both start and finish dictionaries to convert them to sorted vectors.
+#Will be used in save_gantt_charts_to_folder-function
 function state_at_time_t(state_T::Dict{Int64, Dict{Int64, Int64}}, t::Int64)
     state_at_t = [state_T[t][k] for k in sort(collect(keys(state_T[t])))]
 end
@@ -109,6 +110,9 @@ function R_aux(ongoing_jobs::Vector{Int64}, timestep::Int64, resource_load_T::Di
     load_value = value.(combined_load)
     return load_value
 end
+
+#--------------------------------------------------------------------------------------------------------------------------------------------------------
+#SOME PERFORMANCE METRICS, vielä kehitysasteella
 
 ##Numerical metrics:
 #1. Käyttöaste (Utilization)
